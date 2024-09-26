@@ -1,0 +1,13 @@
+name: Hoang
+title: Hoang
+username: dfhannum
+account: dfhannum
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12754424
+bundleId: 9118283
+url: https://dfhannum.shinyapps.io/Hoang/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: images/PaperImage.png|publications/sciadv.adn2091_sm.pdf|publications/sciadv.adn2091.pdf|scripts/GSE246574_cleanedUp.Rmd|scripts/GSE246574.Rmd|scripts/Intro.html|scripts/Intro.Rmd

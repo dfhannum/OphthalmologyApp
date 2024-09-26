@@ -1,0 +1,2083 @@
+---
+title: "Mouse Retinas"
+output: html_document
+output: html_document
+        toc: yes
+        toc_float: yes
+        theme: united
+        highlight: tango
+        code_folding: hide
+        number_sections: true
+        keep_md: no
+        toc_depth: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+
+knitr::opts_knit$set(root.dir = '/Users/dfhannum/Desktop/Hoang/')
+
+library(Seurat) # for scRNA functions and plots
+library(ggplot2) # for custom plotting
+library(data.table) # data file processing and tstrsplit
+
+```
+
+# Intro
+
+Downloaded from: [GEO](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE246574)
+
+
+# Loading Data
+
+```{r}
+# install.packages('hdf5r')
+
+obj <- Read10X_h5(filename = './data/GSE246574_Combined_scRNA_filtered_feature_bc_matrix.h5')
+
+obj <- CreateSeuratObject(obj)
+```
+
+```{r}
+table(obj@meta.data$orig.ident)
+
+table(tstrsplit(colnames(obj),'-', keep = 2)[[1]])
+
+obj$orig.ident <- ifelse( tstrsplit(colnames(obj),'-', keep = 2)[[1]] == 1, 'WT','MUT')
+
+obj
+```
+
+
+# Metadata
+
+```{r}
+ggplot(obj@meta.data) +
+  facet_wrap(~orig.ident, ncol = 1, nrow = 2) +
+  theme_bw() +
+  geom_histogram(aes(x = log10(nCount_RNA)), bins = 30)
+
+```
+
+```{r}
+ggplot(obj@meta.data) +
+  facet_wrap(~orig.ident, ncol = 1, nrow = 2) +
+  theme_bw() +
+  geom_histogram(aes(x = log10(nFeature_RNA)), bins = 30)
+```
+
+```{r}
+obj$percent.mt <- PercentageFeatureSet(obj, pattern = 'mt-')
+ggplot(obj@meta.data) +
+  facet_wrap(~orig.ident, ncol = 1, nrow = 2) +
+  theme_bw() +
+  geom_histogram(aes(x = percent.mt), bins = 30)
+```
+
+
+## Combined
+
+```{r}
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA)) +
+  scale_x_log10() + scale_y_log10() +
+  geom_point(alpha = .9, size = .1) +
+  theme_bw()
+
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA,
+                          color = orig.ident)) +
+  scale_x_log10() + scale_y_log10() +
+  geom_point(alpha = .9, size = .1) +
+  guides(colour = guide_legend(override.aes = list(size=8))) +
+  theme_bw() 
+```
+
+
+## Filters
+
+
+```{r}
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA,
+                          color = orig.ident)) +
+  scale_x_log10() + scale_y_log10() +
+  geom_point(alpha = .9, size = .1) +
+  guides(colour = guide_legend(override.aes = list(size=8))) +
+  theme_bw() +
+  geom_vline(xintercept = 1000, color = 'black', linetype = 2)
+
+table(obj$nCount_RNA > 1000)
+table(obj$nCount_RNA > 1000, obj$orig.ident)
+```
+
+```{r}
+ggplot(obj@meta.data) +
+  facet_wrap(~orig.ident, ncol = 1, nrow = 2) +
+  theme_bw() +
+  geom_histogram(aes(x = percent.mt), bins = 30) +
+  geom_vline(color = 'red', linetype = 2, xintercept = 10)
+```
+
+```{r}
+table(obj$percent.mt < 10)
+table(obj$percent.mt < 10, obj$orig.ident)
+```
+
+# Subsetting & Processing
+
+```{r}
+obj <- subset(obj, percent.mt < 10 & nCount_RNA > 1000)
+```
+
+```{r}
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+
+obj <- RunPCA(obj, features = VariableFeatures(obj))
+
+DimPlot(obj,pt.size = .1)
+
+obj <- FindNeighbors(obj, dims = 1:10)
+obj <- FindClusters(obj, resolution = 0.5)
+
+table(obj$seurat_clusters)
+table(obj$orig.ident,obj$seurat_clusters )
+
+obj <- RunUMAP(obj, dims = 1:10)
+
+DimPlot(obj)
+
+DimPlot(obj, group.by = 'orig.ident')
+```
+
+# Cluster Identification
+
+## HCL
+
+```{r}
+hcl <- read.table('../References/HCL_centroids.txt', sep = '\t')
+
+table(rownames(hcl) %in% toupper(rownames(obj)))
+
+# rownames(hcl)
+
+translation <- read.table('../References/gene_names_mgi-entrez-ensembl-hsapensembl-hsapienName.txt', 
+                          header = T)
+
+table(rownames(hcl) %in% translation$hsapiens_homolog_associated_gene_name)
+table(rownames(obj) %in% translation$mgi_symbol)
+
+temp <- translation[translation$hsapiens_homolog_associated_gene_name != '' & translation$mgi_symbol != '',]
+temp <- temp[temp$hsapiens_homolog_associated_gene_name %in% rownames(hcl) &
+               temp$mgi_symbol %in% rownames(obj),]
+
+temp <- temp[!duplicated(temp$mgi_symbol),]
+temp <- temp[!duplicated(temp$hsapiens_homolog_associated_gene_name),]
+
+hcl <- hcl[rownames(hcl) %in% temp$hsapiens_homolog_associated_gene_name,]
+rownames(hcl) <- temp$mgi_symbol
+```
+
+
+```{r}
+centroids <- AggregateExpression(obj)$RNA
+```
+
+
+```{r}
+cor_matrix <- cor(as.matrix(centroids[rownames(hcl),]),
+                  hcl,
+                  method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+# which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order_centroids <- x_order$order
+
+cor_matrix <- cor_matrix[order_centroids,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## PLAE ref 
+
+### Curated Labels
+
+```{r}
+# list.files()
+plae_mouse <-read.table('../References/plae/4000-counts-universe-study_accession-scANVIprojection-15-5-20-50-0.1-CellType-Mus_musculus.pseudoCounts.tsv', sep = '\t', header = T)
+
+rownames(plae_mouse) <- plae_mouse[,1]
+
+plae_mouse <- plae_mouse[,-1]
+# hist(colSums(plae_mouse))
+
+
+# plae_mouse[1:10,1:10]
+
+# table(substr(rownames(plae_mouse),1,5))
+
+# tail(plae_mouse[,1:10],100)
+```
+
+```{r}
+translation_file <- read.table('../References//gene_names_mgi-entrez-ensembl-hsapensembl.txt', 
+                               header = T)
+
+# translation_file
+# table(rownames(plae_mouse) %in% translation_file$ensembl_gene_id)
+# table(rownames(plae_mouse) %in% translation_file$hsapiens_homolog_ensembl_gene)
+# 
+# table(rownames(plae_mouse) %in% c(translation_file$ensembl_gene_id, translation_file$hsapiens_homolog_ensembl_gene))
+# 
+# table(rownames(obj) %in% translation_file$mgi_symbol)
+# 
+# table(VariableFeatures(obj) %in% translation_file$mgi_symbol)
+# 
+# 
+plae_mouse <- plae_mouse[rownames(plae_mouse) %in% c(translation_file$ensembl_gene_id,
+                                                     translation_file$hsapiens_homolog_ensembl_gene),]
+
+# dim(plae_mouse)
+# 
+# summary(rowSums(plae_mouse))
+# 
+# summary(colSums(plae_mouse))
+
+df <- data.frame(gene = rownames(plae_mouse),
+                 x = rowSums(plae_mouse))
+
+# table(df$x == 0)
+
+# ggplot(df[df$x != 0,], aes(x = x)) +
+#   # scale_x_log10() +
+#   geom_histogram(bins = 30)
+
+# table(rowSums(plae_mouse) > 1e3)
+
+plae_mouse <- plae_mouse[rowSums(plae_mouse) > 1e3,]
+
+temp1 <- translation_file[translation_file$hsapiens_homolog_ensembl_gene %in% rownames(plae_mouse),]
+
+# table(duplicated(temp1$hsapiens_homolog_ensembl_gene))
+# 
+# table(temp1$mgi_symbol == '')
+# 
+temp1 <- temp1[temp1$mgi_symbol != '',]
+
+# table(duplicated(temp1$hsapiens_homolog_ensembl_gene))
+
+# table(temp1$mgi_symbol %in% rownames(obj))
+
+temp1 <- temp1[temp1$mgi_symbol %in% rownames(obj),]
+
+# table(duplicated(temp1$hsapiens_homolog_ensembl_gene))
+
+# table(duplicated(temp1$mgi_symbol))
+
+temp1$plae_mouse_sd <- log10(apply(plae_mouse[temp1$hsapiens_homolog_ensembl_gene,],1,sd))
+# head(temp1)
+
+variable_features_plot <- VariableFeaturePlot(obj)
+temp1$obj_sd <- variable_features_plot$data[temp1$mgi_symbol,]$variance.standardized
+
+temp1 <- temp1[order(temp1$obj_sd, decreasing = T),]
+
+
+# table(temp1$mgi_symbol == '')
+# table(temp1$mgi_symbol %in% rownames(obj))
+# table(temp1$hsapiens_homolog_ensembl_gene %in% rownames(plae_mouse))
+
+# table(duplicated(temp1$mgi_symbol))
+
+temp1 <- temp1[!duplicated(temp1$mgi_symbol),]
+
+table(duplicated(temp1$hsapiens_homolog_ensembl_gene))
+
+temp1 <- temp1[!duplicated(temp1$hsapiens_homolog_ensembl_gene),]
+
+# temp1
+```
+
+
+```{r}
+temp2 <- translation_file[translation_file$ensembl_gene_id %in% rownames(plae_mouse),]
+
+# table(duplicated(temp2$ensembl_gene))
+# 
+# table(temp2$mgi_symbol == '')
+# 
+# temp2 <- temp2[temp2$mgi_symbol != '',]
+# 
+# table(duplicated(temp2$ensembl_gene_id))
+# 
+# table(temp2$mgi_symbol %in% rownames(obj))
+
+temp2 <- temp2[temp2$mgi_symbol %in% rownames(obj),]
+
+# table(duplicated(temp2$ensembl_gene))
+# 
+# table(duplicated(temp2$mgi_symbol))
+
+temp2$obj_sd <- variable_features_plot$data[temp2$mgi_symbol,]$variance.standardized
+
+temp2 <- temp2[order(temp2$obj_sd, decreasing = T),]
+
+# 
+# table(temp2$mgi_symbol == '')
+# table(temp2$mgi_symbol %in% rownames(obj))
+# table(temp2$ensembl_gene %in% rownames(plae_mouse))
+# 
+# table(duplicated(temp2$mgi_symbol))
+
+temp2 <- temp2[!duplicated(temp2$mgi_symbol),]
+
+# table(duplicated(temp2$ensembl_gene))
+
+# temp2
+```
+
+
+```{r}
+plae_mouse1 <- plae_mouse[temp1$hsapiens_homolog_ensembl_gene,]
+
+rownames(plae_mouse1) <- temp1$mgi_symbol
+
+plae_mouse2 <- plae_mouse[temp2$ensembl_gene,]
+
+rownames(plae_mouse2) <- temp2$mgi_symbol
+
+
+plae_mouse <- rbind(plae_mouse1, plae_mouse2)
+```
+
+
+#### Centroids
+
+##### All Overlap Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), rownames(centroids))
+length(gene_set)
+
+dim(plae_mouse)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+
+
+##### Our HV Overlap Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), VariableFeatures(obj)))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+##### Their HV Overlap Genes
+
+```{r}
+variable_plae_mouse <- rownames(plae_mouse[order(apply(plae_mouse,1,var), decreasing = T),])[1:2000]
+```
+
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), variable_plae_mouse))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+##### Both HV Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), 
+                                                      intersect(VariableFeatures(obj),
+                                                                variable_plae_mouse)))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+
+```{r}
+# plae_mouse_manual_full <- plae_mouse_full
+plae_mouse_manual <- plae_mouse
+
+```
+
+
+#### By Cell
+
+All with by our hv genes set
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), VariableFeatures(obj)))
+# length(gene_set)
+
+temp_cor <- cor(as.matrix(obj@assays$RNA$data[gene_set,]),
+                plae_mouse[gene_set,],
+                method = 'spearman')
+```
+
+```{r}
+
+
+two_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 2*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+t <- apply(temp_cor,1,two_sds_above)
+
+# table(t)
+
+obj$plae_curated_assignments_2sd <- t
+
+three_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 3*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+
+
+t <- apply(temp_cor,1,three_sds_above)
+# table(t)
+obj$plae_curated_assignments_3sd <- t
+```
+
+```{r}
+temp_cor_scaled <- t(scale(t(temp_cor)))
+
+# summary(rowMeans(temp_cor))
+# summary(rowMeans(temp_cor_scaled))
+
+max_greater_than2sd <- function(x){
+  max_ <- max(x)
+  if (max_ > 2){
+    return(tstrsplit(colnames(temp_cor)[which.max(x)], '__', keep = 2)[[1]])
+  }
+  else{
+    return('')
+  }
+}
+
+t <- apply(temp_cor_scaled,1,max_greater_than2sd)
+
+obj$plae_curated_assignments_2sd_max <- t
+```
+
+
+```{r}
+# breaker_breaker
+```
+
+
+```{r}
+temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
+
+temp$Var1_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order])
+
+temp$Var1_sum_woNA <- NA
+temp$box <- 0
+order_of_markers <- c()
+for (i in levels(temp$Var1_ordered)){
+  sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+  
+  temp[temp$Var1 ==i,]$Var1_sum_woNA <- sum(sub$Freq)
+  
+  max <- max(sub$Freq)
+  if(max > 0){
+    temp[temp$Var1 == i & temp$Freq == max,]$box <- 1
+  }
+  
+  max_var2 <- sub[which(sub$Freq == max(sub$Freq)),]$Var2
+  order_of_markers <- c(order_of_markers, as.character(max_var2))
+}
+
+order_of_markers <- c('',unique(order_of_markers))
+
+additional_levels <- levels(temp$Var2)[!(levels(temp$Var2) %in% order_of_markers)]
+
+if (length(additional_levels) >=1 ){
+  order_of_markers <- c(order_of_markers, additional_levels)
+}
+
+temp$Var1_perc_woNA <- ifelse(temp$Var2 == '', NA,
+                              ifelse(temp$Var1_sum_woNA == 0,0,
+                                     temp$Freq / temp$Var1_sum_woNA))
+
+temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+
+ggplot(temp, aes(x = Var1_ordered, y = Var2_ordered, fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+
+temp$keep <- 0
+
+for (i in unique(temp$Var2)[unique(temp$Var2) != '']){
+  max_ <- max(temp[temp$Var2 ==i,]$Var1_perc_woNA)
+  print(paste0(i,': ', max_))
+  temp[temp$Var2 == i,]$keep <- max_ > .2
+}
+
+# table(is.na(temp$keep2))
+
+temp$keep2 <- temp$keep | (temp$box == 1)
+
+
+ggplot(temp[temp$keep2,], aes(x = Var1_ordered, y = Var2_ordered,
+                              fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells_subset.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+```
+
+##### w/o Doublet
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), VariableFeatures(obj)))
+# length(gene_set)
+
+temp_cor <- cor(as.matrix(obj@assays$RNA$data[gene_set,]),
+                plae_mouse[gene_set,!grepl('doublet', colnames(plae_mouse), ignore.case = T)],
+                method = 'spearman')
+```
+
+```{r}
+
+
+two_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 2*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+t <- apply(temp_cor,1,two_sds_above)
+
+# table(t)
+
+obj$plae_curated_assignments_2sd <- t
+
+three_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 3*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+
+
+t <- apply(temp_cor,1,three_sds_above)
+# table(t)
+obj$plae_curated_assignments_3sd <- t
+```
+
+```{r}
+temp_cor_scaled <- t(scale(t(temp_cor)))
+
+# summary(rowMeans(temp_cor))
+# summary(rowMeans(temp_cor_scaled))
+
+max_greater_than2sd <- function(x){
+  max_ <- max(x)
+  if (max_ > 2){
+    return(tstrsplit(colnames(temp_cor)[which.max(x)], '__', keep = 2)[[1]])
+  }
+  else{
+    return('')
+  }
+}
+
+t <- apply(temp_cor_scaled,1,max_greater_than2sd)
+
+obj$plae_curated_assignments_2sd_max <- t
+```
+
+
+```{r}
+# breaker_breaker
+```
+
+
+```{r}
+temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
+
+temp$Var1_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order])
+
+temp$Var1_sum_woNA <- NA
+temp$box <- 0
+order_of_markers <- c()
+for (i in levels(temp$Var1_ordered)){
+  sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+  
+  temp[temp$Var1 ==i,]$Var1_sum_woNA <- sum(sub$Freq)
+  
+  max <- max(sub$Freq)
+  if(max > 0){
+    temp[temp$Var1 == i & temp$Freq == max,]$box <- 1
+  }
+  
+  max_var2 <- sub[which(sub$Freq == max(sub$Freq)),]$Var2
+  order_of_markers <- c(order_of_markers, as.character(max_var2))
+}
+
+order_of_markers <- c('',unique(order_of_markers))
+
+additional_levels <- levels(temp$Var2)[!(levels(temp$Var2) %in% order_of_markers)]
+
+if (length(additional_levels) >=1 ){
+  order_of_markers <- c(order_of_markers, additional_levels)
+}
+
+temp$Var1_perc_woNA <- ifelse(temp$Var2 == '', NA,
+                              ifelse(temp$Var1_sum_woNA == 0,0,
+                                     temp$Freq / temp$Var1_sum_woNA))
+
+temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+
+ggplot(temp, aes(x = Var1_ordered, y = Var2_ordered, fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+
+temp$keep <- 0
+
+for (i in unique(temp$Var2)[unique(temp$Var2) != '']){
+  max_ <- max(temp[temp$Var2 ==i,]$Var1_perc_woNA)
+  print(paste0(i,': ', max_))
+  temp[temp$Var2 == i,]$keep <- max_ > .2
+}
+
+# table(is.na(temp$keep2))
+
+temp$keep2 <- temp$keep | (temp$box == 1)
+
+
+ggplot(temp[temp$keep2,], aes(x = Var1_ordered, y = Var2_ordered,
+                              fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells_subset.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+```
+
+```{r}
+top_hit_labels <- temp[temp$box == 1,]$Var2
+names(top_hit_labels) <- temp[temp$box == 1,]$Var1
+top_hit_labels <- as.character(top_hit_labels[order(as.numeric(names(top_hit_labels)))])
+
+obj$top_hit_labels <- factor(obj$seurat_clusters, labels = top_hit_labels)
+
+table(obj$seurat_clusters, obj$top_hit_labels)
+
+DimPlot(obj, group.by = 'top_hit_labels', label = T)
+
+obj$fine_top_hit_labels <- paste0(obj$seurat_clusters,':',obj$top_hit_labels)
+```
+
+
+# Additional QC
+
+```{r}
+# obj$log10_nCount_RNA <- log10()
+VlnPlot(obj, group.by = 'fine_top_hit_labels', features = 'nCount_RNA', pt.size = 0) +
+  NoLegend() + scale_y_log10()
+
+
+VlnPlot(obj, group.by = 'fine_top_hit_labels', features = 'nCount_RNA', pt.size = 0) +
+  NoLegend() + scale_y_log10() + 
+  geom_hline(yintercept = 2000, colour = 'black', linetype = 2)
+
+
+table(obj$nCount_RNA >= 2000)
+table(obj$nCount_RNA >= 2000, obj$orig.ident)
+table(obj$nCount_RNA >= 2000, obj$fine_top_hit_labels)
+
+obj$log10_nCount_RNA <- log10(obj$nCount_RNA)
+
+FeaturePlot(obj, features = 'log10_nCount_RNA', cols = c('white','blue'))
+
+obj$filter_nCount <- obj$nCount_RNA >= 2000
+DimPlot(obj, group.by = 'filter_nCount', cols = c("grey", 'red'))
+
+DimPlot(obj, split.by = 'filter_nCount')
+```
+
+
+```{r}
+VlnPlot(obj, group.by = 'fine_top_hit_labels', features = 'nFeature_RNA', pt.size = 0) +
+  NoLegend() + scale_y_log10()
+
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA, color = fine_top_hit_labels)) +
+  geom_point(size = .4) +
+  scale_x_log10() + scale_y_log10() + theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  geom_vline(xintercept = 2000, colour = 'black', linetype = 2)
+
+
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA, color = fine_top_hit_labels)) +
+  geom_point(size = .4) +
+  scale_x_log10() + scale_y_log10() + theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  geom_abline( colour = 'black', intercept = .6, slope = .7)
+
+obj$filter <- log10(obj$nFeature_RNA) > ((log10(obj$nCount_RNA)*.7 + .6))
+table(obj$filter)
+
+table(obj$filter, obj$fine_top_hit_labels)
+
+ggplot(obj@meta.data, aes(x = nCount_RNA, y = nFeature_RNA, color = filter)) +
+  geom_point(size = .4) +
+  scale_x_log10() + scale_y_log10() + theme_bw() +
+  guides(colour = guide_legend(override.aes = list(size=1))) +
+  geom_abline( colour = 'black', intercept = .6, slope = .7)
+
+```
+
+
+```{r}
+VlnPlot(obj, features = 'percent.mt', pt.size = 0, group.by = 'fine_top_hit_labels') +
+  NoLegend()
+```
+
+
+```{r}
+# install.packages('DescTools')
+start.time <- Sys.time()
+obj$Gini <- apply(obj@assays$RNA$counts,2, DescTools::Gini)
+
+Sys.time() - start.time
+```
+
+
+```{r}
+ggplot(obj@meta.data, aes(x = Gini)) +
+  geom_histogram(bins = 30) +
+  theme_bw()
+
+ggplot(obj@meta.data, aes(x = Gini, color = fine_top_hit_labels)) +
+  geom_density() +
+  theme_bw()
+
+ggplot(obj@meta.data, aes(x = log10_nCount_RNA, y = Gini, color = fine_top_hit_labels)) +
+  geom_point() +
+  theme_bw()
+```
+
+
+```{r}
+table(obj$filter, obj$filter_nCount)
+```
+
+
+# Subsetting Round #2
+
+```{r}
+obj <- subset(obj, filter & filter_nCount)
+```
+
+# Processing
+
+```{r}
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+
+obj <- RunPCA(obj, features = VariableFeatures(obj))
+
+# DimPlot(obj,pt.size = .1)
+
+obj <- FindNeighbors(obj, dims = 1:10)
+obj <- FindClusters(obj, resolution = 0.5)
+
+table(obj$seurat_clusters)
+table(obj$orig.ident,obj$seurat_clusters )
+
+obj <- RunUMAP(obj, dims = 1:10)
+
+DimPlot(obj)
+
+DimPlot(obj, group.by = 'orig.ident')
+DimPlot(obj, split.by = 'orig.ident')
+```
+
+
+# Finding Markers
+
+```{r}
+all_markers <- FindAllMarkers(obj, only.pos = T, logfc.threshold = .2)
+
+table(all_markers$cluster)
+head(all_markers)
+
+table(all_markers$p_val_adj < .001, all_markers$cluster)
+
+table(!duplicated(all_markers$gene))
+
+all_markers <- all_markers[all_markers$p_val_adj < .001,]
+```
+
+
+# Cluster Identification
+
+```{r}
+centroids <- AggregateExpression(obj)$RNA
+```
+
+## HCL
+
+```{r}
+cor_matrix <- cor(as.matrix(centroids[rownames(hcl),]),
+                  hcl,
+                  method = 'spearman')
+
+# cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+# which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order_centroids <- x_order$order
+
+cor_matrix <- cor_matrix[order_centroids,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## PLAE Mouse
+
+#### Centroids
+
+##### All Overlap Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), rownames(centroids))
+length(gene_set)
+
+dim(plae_mouse)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+
+
+##### Our HV Overlap Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), VariableFeatures(obj)))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+##### Their HV Overlap Genes
+
+```{r}
+variable_plae_mouse <- rownames(plae_mouse[order(apply(plae_mouse,1,var), decreasing = T),])[1:2000]
+```
+
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), variable_plae_mouse))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+##### Both HV Genes
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), 
+                                                      intersect(VariableFeatures(obj),
+                                                                variable_plae_mouse)))
+length(gene_set)
+
+
+cor_matrix <- cor(as.matrix(centroids[gene_set,]), plae_mouse[gene_set ,], method = 'spearman')
+
+cor_matrix[1:10,1:10]
+
+which_top3 <- function(x){
+  colnames(cor_matrix)[which(x > sort(x,decreasing = T)[4])]
+}
+
+which_top3(c(1,2,8,9,3,4,5,6))
+
+x_order <- hclust(dist(t(centroids)))
+order <- x_order$order
+
+cor_matrix <- cor_matrix[order,]
+
+to_keep <- apply(cor_matrix,1,which_top3)
+
+temp <- cor_matrix[,unique(as.vector(to_keep))]
+
+temp <- reshape2::melt(temp)
+
+temp$Var1 <- factor(temp$Var1, levels = unique(temp$Var1))
+
+temp$Var2 <- factor(temp$Var2, levels = unique(temp$Var2))
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value))
+
+temp$top3 <- F
+
+to_keep[,1]
+
+colnames(to_keep)
+
+for (i in 1:dim(to_keep)[2]){
+  # print(i)
+  
+  # break
+  Var1 <- colnames(to_keep)[i]
+  Var2 <- to_keep[,i]
+  
+  temp[temp$Var1 == Var1 & temp$Var2 %in% Var2,]$top3 <- T
+}
+
+ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
+```
+
+
+### By Cells
+
+```{r}
+temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
+
+temp$Var1_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order])
+
+temp$Var1_sum_woNA <- NA
+temp$box <- 0
+order_of_markers <- c()
+for (i in levels(temp$Var1_ordered)){
+  sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+  
+  temp[temp$Var1 ==i,]$Var1_sum_woNA <- sum(sub$Freq)
+  
+  max <- max(sub$Freq)
+  if(max > 0){
+    temp[temp$Var1 == i & temp$Freq == max,]$box <- 1
+  }
+  
+  max_var2 <- sub[which(sub$Freq == max(sub$Freq)),]$Var2
+  order_of_markers <- c(order_of_markers, as.character(max_var2))
+}
+
+order_of_markers <- c('',unique(order_of_markers))
+
+additional_levels <- levels(temp$Var2)[!(levels(temp$Var2) %in% order_of_markers)]
+
+if (length(additional_levels) >=1 ){
+  order_of_markers <- c(order_of_markers, additional_levels)
+}
+
+temp$Var1_perc_woNA <- ifelse(temp$Var2 == '', NA,
+                              ifelse(temp$Var1_sum_woNA == 0,0,
+                                     temp$Freq / temp$Var1_sum_woNA))
+
+temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+
+ggplot(temp, aes(x = Var1_ordered, y = Var2_ordered, fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+
+temp$keep <- 0
+
+for (i in unique(temp$Var2)[unique(temp$Var2) != '']){
+  max_ <- max(temp[temp$Var2 ==i,]$Var1_perc_woNA)
+  print(paste0(i,': ', max_))
+  temp[temp$Var2 == i,]$keep <- max_ > .2
+}
+
+# table(is.na(temp$keep2))
+
+temp$keep2 <- temp$keep | (temp$box == 1)
+
+
+ggplot(temp[temp$keep2,], aes(x = Var1_ordered, y = Var2_ordered,
+                              fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells_subset.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+```
+
+```{r}
+top_hit_labels <- temp[temp$box == 1,]$Var2
+names(top_hit_labels) <- temp[temp$box == 1,]$Var1
+top_hit_labels <- as.character(top_hit_labels[order(as.numeric(names(top_hit_labels)))])
+
+obj$top_hit_labels <- factor(obj$seurat_clusters, labels = top_hit_labels)
+
+table(obj$seurat_clusters, obj$top_hit_labels)
+
+DimPlot(obj, group.by = 'top_hit_labels', label = T)
+
+obj$fine_top_hit_labels <- paste0(obj$seurat_clusters,':',obj$top_hit_labels)
+```
+
+
+
+## Marker Genes
+
+```{r}
+levels(obj$fine_top_hit_labels)
+VlnPlot(obj, features = 'Rpap3', pt.size = 0, group.by = 'fine_top_hit_labels') +
+  NoLegend()
+
+VlnPlot(obj, features = 'Rpap3', pt.size = 0, group.by = 'top_hit_labels') +
+  NoLegend()
+```
+
+
+```{r}
+markers <- read.csv('../References/MarkerGenes091224.csv')
+
+head(markers)
+
+table(markers$Gene %in% rownames(obj))
+
+markers$Gene[!(markers$Gene %in% rownames(obj))]
+
+markers <- markers[markers$Gene %in% rownames(obj),]
+
+table(duplicated(markers$Gene))
+```
+
+
+```{r}
+markers$group <- paste0(markers$Comparison,':', markers$Reference_Origin)
+
+markers$CellType_by_group_cnt <- NA
+for (grp in unique(markers$group)){
+  # print(grp)
+  
+  for (set in unique(markers[markers$group == grp,]$CellType)){
+    markers[markers$group == grp & markers$CellType == set,]$CellType_by_group_cnt <-
+      dim(markers[markers$group == grp & markers$CellType == set,])[1]
+  }
+}
+
+markers$CellType_labeled_withN <- paste0(markers$CellType, ' (n = ', markers$CellType_by_group_cnt,')')
+```
+
+```{r}
+# markers
+
+for (i in unique(markers$group)){
+  print(i)
+  
+  subset <- markers[markers$group == i,]
+  
+  
+  subset <- subset[!grepl('/',subset$CellType),]
+  
+  table(subset$CellType)
+  
+  subset <- subset[!duplicated(subset$Gene),]
+  
+  table(subset$Gene %in% all_markers$gene)
+  
+  temp <- merge(subset, all_markers, by.x = 'Gene', by.y = 'gene')
+  
+  head(temp)
+  
+  temp <- merge(temp, obj@meta.data[!duplicated(obj$seurat_clusters),
+                                    c('seurat_clusters','top_hit_labels')],
+                by.x = 'cluster', by.y = 'seurat_clusters')
+  
+  temp$labeled_clusters <- paste0(temp$cluster, ':', temp$top_hit_labels)
+  temp <- as.data.frame(table(temp$CellType_labeled_withN, temp$labeled_clusters))
+  
+  temp$cnt <- as.numeric(gsub(')','',tstrsplit(temp$Var1, '\\ ', keep = 4)[[1]]))
+
+  temp$pct <- temp$Freq / temp$cnt
+  
+  temp$label <- ifelse(temp$Freq != 0, temp$Freq,'')
+  
+  temp[,c('cluster','cluster_group')] <- tstrsplit(temp$Var2,':')
+  
+  print(ggplot(temp) +
+    facet_grid(cols = vars(cluster_group),
+               space = 'free', scales = 'free') +
+    geom_tile(aes(x = cluster, y = Var1, fill = pct))  + 
+    scale_fill_gradient(low = 'white', high = 'red') +
+    geom_text(aes(x = cluster, y = Var1, label = label)) +
+    ggtitle(i) +
+    xlab('Cluster') +
+    ylab("Marker Gene Cell Types"))
+  
+  # for (ct in unique(subset$CellType)){
+  #   mrkrs <- subset[subset$CellType == ct,]$Gene
+  # 
+  #   # print(VlnPlot(obj, features = mrkrs, pt.size = 0))
+  #   # print(VlnPlot(obj, features = mrkrs, pt.size = 0, group.by = 'top_hit_labels'))
+  # }
+  # 
+  # subset
+  # scores
+  # plot <- DotPlot(obj, features = subset$Gene, group.by = 'fine_top_hit_labels')
+  # 
+  # plot <- plot$data
+  # 
+  # plot <- merge(plot, subset[,1:2], by.x = 'features.plot', by.y = 'Gene')
+  # 
+  # plot[,c('cluster','PLAE_label')] <- tstrsplit(plot$id,':')
+  # 
+  # ggplot(plot[!(grepl('\\/', plot$CellType)),]) +
+  #   facet_grid(cols = vars(PLAE_label),
+  #              rows = vars(CellType),
+  #              scales = 'free', space = 'free') +
+  #   geom_point(aes(x = cluster, y = features.plot, size = pct.exp,
+  #                  color = avg.exp.scaled)) +
+  #   theme_bw()
+}
+```
+
+
+```{r}
+# clusters <- levels(obj$harmony_clusters)
+# 
+# temp <- data.frame(cellType = rep(markers$CellType, each = length(clusters)),
+#            Gene = rep(markers$Gene, each = length(clusters)))
+# 
+# temp$avg.exp <- NA
+# temp$pct.exp <- NA
+# temp
+
+for (i in unique(markers$CellType)){
+  
+  print(DotPlot(obj, features = unique(markers[markers$CellType == i,]$Gene),
+                cols = c('white','blue')) +
+          ggtitle(i) +
+          theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+          coord_flip())
+}
+```
+
+
+### Scoring
+
+
+```{r}
+
+scores <- list()
+scores_scaled <- list()
+for (set in unique(markers$group)){
+  scores_unscaled <- data.frame(row.names = colnames(obj))
+  # scores_scaled <- data.frame(row.names = colnames(obj))
+  
+  temp_set <- markers[markers$group == set,]
+  for (i in unique(temp_set$CellType)){
+    features <- temp_set[temp_set$CellType == i,]$Gene
+    features <- features
+    if (length(features) > 1){
+      unscaled <- obj@assays$RNA$data[features,]
+      # unscaled
+      # break
+      scores_unscaled[,i] <- colSums(unscaled) / length(features)
+      # scores_scaled[,i] <- scale(scores_unscaled[,i])
+    }
+    
+  }
+  
+  scores[[set]] <- scores_unscaled
+  
+  scores_scaled[[set]] <- scale(scores_unscaled)
+}
+```
+
+
+```{r}
+# md <- obj@meta.data
+
+idx <- 1:4
+names(idx) <- names(scores)
+# cnt <- 1
+names(scores) <- c("EyeCup:PrasovLab",
+                          "RPE/Choroid:HoangLab",
+                          "Retina:HoangLab",
+                          "General:HoangLab") 
+for (i in names(scores)){
+  print(i)
+  set <- scores[[i]]
+  # colnames(set)
+  set <- set[,!grepl('/', colnames(set))]
+  col_names <-  paste0(i,':',colnames(set))
+  obj@meta.data[,col_names] <- set
+  
+  for (name in col_names){
+    print(VlnPlot(obj, features = name, pt.size = 0) + NoLegend())
+  }
+  # cnt <- cnt + 1
+}
+```
+
+```{r}
+names(scores_scaled) <- c("EyeCup:PrasovLab",
+                          "RPE/Choroid:HoangLab",
+                          "Retina:HoangLab",
+                          "General:HoangLab") 
+for (set in names(scores_scaled)){
+  print(set)
+  
+  scores_scaled
+  
+  means <- aggregate(scores_scaled[[set]][,!grepl('/', colnames(scores_scaled[[set]]))],
+                     by = list(clusters = obj$seurat_clusters), mean)
+  
+  rownames(means) <- means$clusters
+  
+  means <- means[,-1]
+  temp <- reshape2::melt(as.matrix(means))
+  
+  temp$clusters_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order_centroids])
+  
+  ggplot(temp) +
+    geom_tile(aes(x = clusters_ordered, y = Var2, fill = value)) +
+    scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = 0) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+  
+  temp$value2 <- ifelse(temp$value > 5, 5, temp$value)
+
+  
+  print(ggplot(temp) +
+    geom_tile(aes(x = clusters_ordered, y = Var2, fill = value2)) +
+    scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = 0) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+
+  
+}
+```
+
+
+```{r}
+cnt <- 1
+marker_heatmap_plots <- list()
+# renamed later and need to match fix groups earlier
+names(scores_scaled) <- c("EyeCup:PrasovLab",
+                          "RPE/Choroid:HoangLab",
+                          "Retina:HoangLab",
+                          "General:HoangLab") 
+for (set in names(scores_scaled)){
+  print(set)
+  # next
+  # break
+  # scores_scaled
+  
+  means <- aggregate(scores_scaled[[set]][,!grepl('/', colnames(scores_scaled[[set]]))],
+                     by = list(clusters = obj$seurat_clusters), mean)
+  
+  rownames(means) <- means$clusters
+  
+  means <- means[,-1]
+  temp <- t(scale(t(means)))
+  
+  temp <- reshape2::melt(temp)
+  
+  temp$clusters_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order_centroids])
+  
+  temp$box <- 0
+  order_of_markers <- c()
+  for (i in levels(temp$clusters_ordered)){
+    sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+    
+    max <- max(sub$value)
+    if(max > 0){
+      temp[temp$Var1 == i & temp$value == max,]$box <- 1
+    }
+    
+    max_var2 <- sub[which(sub$value == max(sub$value)),]$Var2
+    order_of_markers <- c(order_of_markers, as.character(max_var2))
+  }
+  
+  order_of_markers <- unique(order_of_markers)
+  order_of_markers <- c(order_of_markers,
+                        as.character(unique(temp$Var2)[!(unique(temp$Var2) %in% order_of_markers)]))
+  temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+  marker_heatmap_plots[[set]] <- (ggplot(temp) +
+    geom_tile(aes(x = clusters_ordered, y = Var2_ordered, fill = value)) +
+    geom_tile(data = temp[temp$box == 1,], aes(x = clusters_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+    scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = 0) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(fill = 'Marker Set\nScore') +
+    xlab('Clusters') +
+    ylab("Marker Sets") +
+    ggtitle(set))
+  
+  
+  print(marker_heatmap_plots[[set]])
+  # Adding label to metadata
+  
+  grps <- temp[temp$box == 1,]$Var2
+  names(grps) <- as.character(temp[temp$box == 1,]$Var1)
+  
+  obj@meta.data[,paste0('Set_',set,'_LabeledClusters')] <- as.character(grps[as.character(obj$seurat_clusters)])
+                
+  cnt <- cnt + 1
+}
+```
+
+
+```{r}
+# table(obj$seurat_clusters, obj$`Set3_LabeledClusters`)
+
+# obj$retin
+var_ <- 'Set_Retina:HoangLab_LabeledClusters'
+
+obj$temp <- obj$`Set_Retina:HoangLab_LabeledClusters`
+DimPlot(obj, group.by = 'temp', label = T)
+```
+
+```{r}
+cluster_info <- data.frame(row.names = paste0('c',levels(obj$seurat_clusters)),
+                           cluster = levels(obj$seurat_clusters))
+
+cluster_info$PLAE <- NA
+
+sets_ <- colnames(obj@meta.data)[grepl('_LabeledClusters$', colnames(obj@meta.data)) &
+                                     grepl('^Set', colnames(obj@meta.data))]
+
+cluster_info[,sets_] <- NA
+for (i in cluster_info$cluster){
+  # print(i)
+  
+  cluster_info[cluster_info$cluster == i,]$PLAE <- as.character(unique(obj@meta.data[obj$seurat_clusters == i,]$top_hit_labels))
+  
+  cluster_info[cluster_info$cluster == i,sets_] <- unique(obj@meta.data[obj$seurat_clusters == i,sets_])
+}
+
+cluster_info
+
+table(cluster_info$PLAE, cluster_info$`Set_Retina:HoangLab_LabeledClusters`)
+```
+
+```{r}
+DimPlot(obj, group.by = 'top_hit_labels', label = T)
+```
+
+
+# Diff Abundance
+
+```{r}
+cell_counts <- as.data.frame(table(obj$top_hit_labels, obj$orig.ident))
+
+ggplot(cell_counts, aes(x = Var2, y = Freq, fill = Var1)) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  theme_bw() + 
+  labs(fill = 'Cell Types') +
+  xlab('Condition') +
+  ggtitle('Cell Type Frequency by Condition')
+
+cell_counts$Var2_sum <- NA
+
+for (i in unique(cell_counts$Var2)){
+  cell_counts[cell_counts$Var2 ==i,]$Var2_sum <- sum(cell_counts[cell_counts$Var2 ==i,]$Freq)
+}
+
+cell_counts$Var2_perc <- cell_counts$Freq / cell_counts$Var2_sum
+
+ggplot(cell_counts, aes(x = Var2, y = Var2_perc, fill = Var1)) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  theme_bw() + 
+  labs(fill = 'Cell Types') +
+  xlab('Condition') +
+  ggtitle('Cell Type Percentage by Condition') + ylab('Percentage of Cells')
+
+```
+
+# DEGs
+
+```{r}
+degs_ <- list()
+degs_plots <- list()
+
+for (i in levels(obj$seurat_clusters)){
+  # sub <- subset(obj, seurat_clusters == i)
+  markers <- FindMarkers(obj,
+                         subset.ident = i,
+                         group.by = 'orig.ident',
+                         ident.1 = 'WT',
+                         ident.2 = 'MUT')
+  markers$gene <- rownames(markers)
+  
+  markers$`-log10(p_val_adj)` <- -log10(markers$p_val_adj)
+  degs_[[i]] <- markers
+  
+  degs_plots[[i]] <- ggplot(markers, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+    geom_point() + ggtitle(paste0("Cluster ", i)) +
+    geom_hline(yintercept = -log10(0.5), colour = 'red', linetype = 2) +
+    theme_bw()
+}
+```
+
+```{r}
+# breaker_breaker
+```
+
+
+```{r}
+# library(plotly)
+
+# markers$gene <- rownames(markers)
+# ggplotly(ggplot(markers, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
+#     geom_point(aes(text = paste0('Gene: ',gene))) + ggtitle(paste0("Cluster ", i)) +
+#     geom_hline(yintercept = -log10(0.5), colour = 'red', linetype = 2) +
+#     theme_bw())
+```
+
+
+```{r}
+overall_markers <- FindMarkers(obj, group.by = 'orig.ident',
+                               ident.1 = 'WT', ident.2 = 'MUT')
+
+table(overall_markers$p_val_adj < .05)
+
+overall_markers <- overall_markers[order(overall_markers$avg_log2FC, decreasing = T),]
+
+top10_bottom10 <- c(rownames(overall_markers)[1:10], rownames(tail(overall_markers,10)))
+
+# DoHeatmap(obj, features = top10_bottom10, group.by = 'orig.ident')
+
+
+```
+
+
+```{r}
+all_markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    dplyr::slice_head(n = 10) %>%
+    ungroup() -> top10
+# DoHeatmap(obj, features = top10$gene) + NoLegend()
+```
+
+
+# To Shiny
+
+
+
+```{r}
+for (i in names(degs_)){
+  temp <- degs_[[i]]
+  temp$color <- ifelse(temp$p_val_adj > .05, 'N.S.',
+                       ifelse(temp$avg_log2FC < 0, 'Up\nin MUT','Up\nin WT'))
+  fc_pos <- sort(temp[temp$avg_log2FC > 0,]$p_val_adj, decreasing = F)[6]
+  fc_neg <- sort(temp[temp$avg_log2FC < 0,]$p_val_adj, decreasing = F)[6]
+  
+  temp$label <- ifelse(temp$p_val_adj > .05, NA,
+                       ifelse(temp$avg_log2FC > 0 & temp$p_val_adj < fc_pos, temp$gene,
+                              ifelse(temp$avg_log2FC < 0 & temp$p_val_adj < fc_neg, temp$gene, '')))
+  
+  degs_[[i]] <- temp
+  # break
+  # table(temp$label)
+  # 
+  # ggplot(temp,aes(x = avg_log2FC, y = `-log10(p_val_adj)`,
+  #                 label = label, color = color)) +
+  #     geom_point() + ggtitle(i) +
+  #     geom_hline(yintercept = -log10(0.5), colour = 'red', linetype = 2) +
+  #     theme_bw() +
+  #     scale_color_manual(values = c('lightgrey','red','blue')) +
+  #     ggrepel::geom_label_repel()
+
+}
+
+d <- VlnPlot(obj, features = 'Rps29', split.by = 'orig.ident', pt.size = 0)
+d +
+  scale_x_discrete(labels = function(x){ifelse(x == '0', expression(bold('0')), x)})
+```
+
+```{r}
+
+saveRDS(marker_heatmap_plots,'./data/marker_heatmap_plots.Rds')
+saveRDS(all_markers,'./data/cluster_find_all_markers.Rds')
+
+centroids <- AggregateExpression(obj)
+saveRDS(centroids$RNA, './data/cluster_centroids.Rds')
+
+names(degs_) <- paste0('Cluster',names(degs_))
+saveRDS(degs_,'./data/cluster_cond_degs.Rds')
+```
+
+
+
+```{r}
+diet_obj <- DietSeurat(obj, layers = 'data',
+                   assays = 'RNA', dimreducs = c('pca','umap'), graphs = NULL)
+
+diet_obj@assays$RNA$counts <- NULL
+diet_obj@assays$RNA$scale.data <- NULL
+
+saveRDS(diet_obj, './data/diet_Seurat_obj_full.Rds')
+```
+
+
+```{r}
+# breaker_breakers
+sort(sapply(.GlobalEnv, object.size))
+
+rm(hcl)
+rm(temp_cor)
+rm(temp_cor_scaled)
+```

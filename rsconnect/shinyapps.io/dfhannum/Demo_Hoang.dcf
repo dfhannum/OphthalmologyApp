@@ -1,0 +1,13 @@
+name: Demo_Hoang
+title: Demo_Hoang
+username: dfhannum
+account: dfhannum
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12754569
+bundleId: 9118413
+url: https://dfhannum.shinyapps.io/Demo_Hoang/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: publications/sciadv.adn2091_sm.pdf|publications/sciadv.adn2091.pdf|scripts/GSE246574_cleanedUp.Rmd|scripts/GSE246574.Rmd|scripts/Intro.html|scripts/Intro.Rmd
