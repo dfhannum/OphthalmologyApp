@@ -16,7 +16,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE, message = FALSE)
 
 # Set the directory to where everything is located
-knitr::opts_knit$set(root.dir = '/Users/dfhannum/Desktop/Hoang/') # sets it for all code chunks
+knitr::opts_knit$set(root.dir = '/Users/dfhannum/Desktop/OphthalmApp/') # sets it for all code chunks
 
 library(Seurat) # for scRNA functions and plots
 library(ggplot2) # for custom plotting
@@ -41,7 +41,7 @@ Loading the data from the h5 format and creating a Seurat object.
 into_time <- Sys.time()
 # Reading in the 10X file saved as an h5
 obj <- Read10X_h5(filename = './data/GSE246574_Combined_scRNA_filtered_feature_bc_matrix.h5')
-
+# getwd()
 # Creating the Seurat object
 obj <- CreateSeuratObject(obj,)
 ```
@@ -1456,6 +1456,10 @@ ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
 
 ## PLAE Mouse
 
+```{r}
+plae_mouse <- plae_mouse[,!grepl('Doublet', colnames(plae_mouse))]
+```
+
 #### Centroids
 
 ##### All Overlap Genes
@@ -1479,6 +1483,8 @@ which_top3(c(1,2,8,9,3,4,5,6))
 
 x_order <- hclust(dist(t(centroids)))
 order <- x_order$order
+
+obj$plae_correlation_all <- factor(obj$seurat_clusters, labels = colnames(cor_matrix)[apply(cor_matrix,1,which.max)])
 
 cor_matrix <- cor_matrix[order,]
 
@@ -1545,6 +1551,8 @@ which_top3(c(1,2,8,9,3,4,5,6))
 x_order <- hclust(dist(t(centroids)))
 order <- x_order$order
 
+obj$plae_correlation_ourHV <- factor(obj$seurat_clusters, labels = colnames(cor_matrix)[apply(cor_matrix,1,which.max)])
+
 cor_matrix <- cor_matrix[order,]
 
 to_keep <- apply(cor_matrix,1,which_top3)
@@ -1586,6 +1594,15 @@ ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
   labs(fill = 'Spearman\nCorrelation') +
   xlab('Clusters') +
   ylab('PLAE Centroids')
+plae_centroid_hv <- ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+  geom_point(data = temp[temp$top3,],
+             aes(x = Var1, y = Var2), shape = 8) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  labs(fill = 'Spearman\nCorrelation') +
+  xlab('Clusters') +
+  ylab('PLAE Centroids')
 ```
 
 ##### Their HV Overlap Genes
@@ -1612,6 +1629,8 @@ which_top3(c(1,2,8,9,3,4,5,6))
 
 x_order <- hclust(dist(t(centroids)))
 order <- x_order$order
+
+obj$plae_correlation_theirHV <- factor(obj$seurat_clusters, labels = colnames(cor_matrix)[apply(cor_matrix,1,which.max)])
 
 cor_matrix <- cor_matrix[order,]
 
@@ -1678,6 +1697,8 @@ which_top3(c(1,2,8,9,3,4,5,6))
 x_order <- hclust(dist(t(centroids)))
 order <- x_order$order
 
+obj$plae_correlation_bothHV <- factor(obj$seurat_clusters, labels = colnames(cor_matrix)[apply(cor_matrix,1,which.max)])
+
 cor_matrix <- cor_matrix[order,]
 
 to_keep <- apply(cor_matrix,1,which_top3)
@@ -1719,10 +1740,409 @@ ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
   labs(fill = 'Spearman\nCorrelation') +
   xlab('Clusters') +
   ylab('PLAE Centroids')
+
+# ggplot(temp, aes(x = Var1, y = Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = 'blue', mid = 'white', high = 'red', midpoint = mean(temp$value)) +
+#   geom_point(data = temp[temp$top3,],
+#              aes(x = Var1, y = Var2), shape = 8) +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+#   labs(fill = 'Spearman\nCorrelation') +
+#   xlab('Clusters') +
+#   ylab('PLAE Centroids')
 ```
 
 
 ### By Cells
+
+```{r}
+# Using our HVGs overlapped with all PLAE 
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(obj), VariableFeatures(obj)))
+
+# Calculating the correlation on the gene_set
+temp_cor <- cor(as.matrix(obj@assays$RNA$data[gene_set,]), # need to convert to a matrix over sparse matrix
+                plae_mouse[gene_set,],
+                method = 'spearman')
+# getwd()
+saveRDS(temp_cor,'./data/plae_correlation_matrix.Rds')
+
+colnames(temp_cor) %in% colnames(obj@meta.data)
+
+# table(rownames(temp_cor) == colnames(obj))
+
+obj@meta.data[paste0('plae:', colnames(temp_cor))] <- temp_cor
+```
+
+There's a couple of ways to look at these results. You can assign a cell a PLAE label based on the top correlation as a simple label transfer. The problem is that may contain many low confidence labels. For example a cell could have a maximum correlation of 52% with CellType1 but also a 50% correlation with five other cell types; this would mean that the label is uninformative and it could be any of a number of cell types because of the small difference.
+
+To restrict to only labels with high confidence we are going to set thresholds requiring the correlation to be either two or three standard deviations about the mean. A standard deviation of +- 1.96 equates to a 95% confidence interval (aka p-value = 0.05), so these can be hard filters. When looking at the +2sd filter we had many cells that reached this threshold for multiple cell types, so we also restricted to the max correlation here.
+
+This may be a lot of information, but in the end it'll give us an idea of cluster IDs in the final heatmap plots
+
+```{r}
+# Function to capture PLAE centroid labels for with high correlations (> 2sd above mean)
+two_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 2*sd(x)))] # the function
+  if (length(targets) == 0){ # returning an empty vector if no centroids meet the threshold
+    return('')
+  }
+  else{ # merging results for samples with greater than one results or returning the singular result
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+t <- apply(temp_cor,1,two_sds_above) # applying this function to the correlation matrix
+
+# table(t)
+
+obj$plae_curated_assignments_2sd <- t # assigning labels to cells in the seurat obj
+
+# same as the two_sds_above but increased to 3sds
+three_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 3*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+# applying to correlation matrix
+t <- apply(temp_cor,1,three_sds_above)
+
+# adding labels to seurat obj
+obj$plae_curated_assignments_3sd <- t
+```
+
+```{r}
+# Scaling the correlation matrix across our cells
+temp_cor_scaled <- t(scale(t(temp_cor)))
+
+# A function that retains the max correlation as long as it is greater than 2sd above
+max_greater_than2sd <- function(x){
+  max_ <- max(x)
+  if (max_ > 2){
+    return(tstrsplit(colnames(temp_cor)[which.max(x)], '__', keep = 2)[[1]])
+  }
+  else{
+    return('')
+  }
+}
+
+# Applying to the scaled matrix
+t <- apply(temp_cor_scaled,1,max_greater_than2sd)
+
+# Assigning it to the seurat obj
+obj$plae_curated_assignments_2sd_max <- t
+```
+
+Now that we have calculated the correlations and assigned labels to cells we are going to visualize them in a heatmap.
+
+```{r}
+# Creating a cross-tabulation frequency table 
+temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
+
+# Ordering the factors with how they appear
+temp$Var1_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order])
+
+# initializing column to  count number of times the first variable appears ignoring the NAs (unassigned cells)
+temp$Var1_sum_woNA <- NA
+
+# intializing box variable for plotting
+temp$box <- 0
+
+# initializing a list to order the columns 
+order_of_markers <- c()
+
+# looping through
+for (i in levels(temp$Var1_ordered)){
+  
+  # Creating a subset of the frequency table
+  # Looking only at one Var1 at a time and only those cells assigned
+  sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+  
+  # Getting a sum of the assigned cells for that Var1
+  temp[temp$Var1 ==i,]$Var1_sum_woNA <- sum(sub$Freq)
+  
+  # Calculating the assignment with highest frequncy for that Var1
+  max <- max(sub$Freq)
+  
+  # Assigning a box as long as the frequency is greater than 0
+  # one cluster had no assignments so broke this on my first run through
+  if(max > 0){
+    temp[temp$Var1 == i & temp$Freq == max,]$box <- 1
+  }
+  
+  # Getting the identity of the max assignment
+  max_var2 <- sub[which(sub$Freq == max(sub$Freq)),]$Var2
+  
+  # Adding that assignment to the order 
+  order_of_markers <- c(order_of_markers, as.character(max_var2))
+}
+
+# Adding the non-assigned to start the order and then only taking the unique values
+order_of_markers <- c('',unique(order_of_markers))
+
+# Adding in additional levels that didn't have a max freq with a cluster
+additional_levels <- levels(temp$Var2)[!(levels(temp$Var2) %in% order_of_markers)]
+
+# Adding additional levels if there are any
+if (length(additional_levels) >=1 ){
+  order_of_markers <- c(order_of_markers, additional_levels)
+}
+
+# Calculating the percentage of assignment ignoring unassigned
+temp$Var1_perc_woNA <- ifelse(temp$Var2 == '', NA,
+                              ifelse(temp$Var1_sum_woNA == 0,0,
+                                     temp$Freq / temp$Var1_sum_woNA))
+
+# Ordering the columns
+temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+
+# Plotting
+ggplot(temp, aes(x = Var1_ordered, # plotting the factors as ordered
+                 y = Var2_ordered, 
+                 fill = Var1_perc_woNA, # filling with the frequency
+                 label = Freq)) + # adding a label
+  geom_tile() + # plotting as heatmap/tile
+  scale_fill_gradient(low = 'white', high = 'red') + # setting the color scale
+  geom_tile(data = temp[temp$box == 1,], # adding boxes to max freq tiles
+            aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA, # making the fill empty so we retain the previous filling 
+            color = 'black', # color of the box
+            width = .9, # width of the box, we make smaller so it lies within the tile
+            height = .9, # ditto above
+            linewidth = 1) + # thickness of the box
+  geom_text(size = 2) + # adding text
+  labs(fill = 'Perc. of\nSig. Hits') + # changing labels to make them informative
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + # angling x-axis text
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') # adding title
+
+
+# The below code can be used to save the image to a specific output
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+
+# Adding a new variable to only keep rows that are informative
+temp$keep <- 0
+
+for (i in unique(temp$Var2)[unique(temp$Var2) != '']){
+  max_ <- max(temp[temp$Var2 ==i,]$Var1_perc_woNA)
+  # print(paste0(i,': ', max_))
+  temp[temp$Var2 == i,]$keep <- max_ > .2 # only keeping a row if it contains > 20% of assignments from at least one cluster
+}
+
+# table(is.na(temp$keep2))
+
+temp$keep2 <- temp$keep | (temp$box == 1) # also keeps rows that contain a max freq (aka box)
+
+
+# Similar plot but with fewer rows
+ggplot(temp[temp$keep2,], aes(x = Var1_ordered, y = Var2_ordered,
+                              fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells_subset.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+```
+
+##### w/o Doublet
+
+They have a cell type labeled as doublet, but without clear documentation so I'm running the same thing but removing this row first.
+
+```{r}
+gene_set <- intersect(rownames(plae_mouse), intersect(rownames(centroids), VariableFeatures(obj)))
+# length(gene_set)
+
+temp_cor <- cor(as.matrix(obj@assays$RNA$data[gene_set,]),
+                plae_mouse[gene_set,!grepl('doublet', colnames(plae_mouse), ignore.case = T)],
+                method = 'spearman')
+```
+
+```{r}
+
+
+two_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 2*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+t <- apply(temp_cor,1,two_sds_above)
+
+# table(t)
+
+obj$plae_curated_assignments_2sd <- t
+
+three_sds_above <- function(x){
+  targets <- colnames(temp_cor)[which(x >= (mean(x) + 3*sd(x)))]
+  if (length(targets) == 0){
+    return('')
+  }
+  else{
+    t <- unlist(tstrsplit(targets,'__',keep = 2)[[1]])
+    t <- unique(t)
+    return(paste0(t, collapse =':'))
+  }
+  
+}
+
+
+
+t <- apply(temp_cor,1,three_sds_above)
+# table(t)
+obj$plae_curated_assignments_3sd <- t
+```
+
+```{r}
+temp_cor_scaled <- t(scale(t(temp_cor)))
+
+# summary(rowMeans(temp_cor))
+# summary(rowMeans(temp_cor_scaled))
+
+max_greater_than2sd <- function(x){
+  max_ <- max(x)
+  if (max_ > 2){
+    return(tstrsplit(colnames(temp_cor)[which.max(x)], '__', keep = 2)[[1]])
+  }
+  else{
+    return('')
+  }
+}
+
+t <- apply(temp_cor_scaled,1,max_greater_than2sd)
+
+obj$plae_curated_assignments_2sd_max <- t
+```
+
+
+```{r}
+# breaker_breaker
+```
+
+
+```{r}
+temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
+
+temp$Var1_ordered <- factor(temp$Var1, levels = unique(temp$Var1)[order])
+
+temp$Var1_sum_woNA <- NA
+temp$box <- 0
+order_of_markers <- c()
+for (i in levels(temp$Var1_ordered)){
+  sub <- temp[temp$Var1 == i & temp$Var2 != '',]
+  
+  temp[temp$Var1 ==i,]$Var1_sum_woNA <- sum(sub$Freq)
+  
+  max <- max(sub$Freq)
+  if(max > 0){
+    temp[temp$Var1 == i & temp$Freq == max,]$box <- 1
+  }
+  
+  max_var2 <- sub[which(sub$Freq == max(sub$Freq)),]$Var2
+  order_of_markers <- c(order_of_markers, as.character(max_var2))
+}
+
+order_of_markers <- c('',unique(order_of_markers))
+
+additional_levels <- levels(temp$Var2)[!(levels(temp$Var2) %in% order_of_markers)]
+
+if (length(additional_levels) >=1 ){
+  order_of_markers <- c(order_of_markers, additional_levels)
+}
+
+temp$Var1_perc_woNA <- ifelse(temp$Var2 == '', NA,
+                              ifelse(temp$Var1_sum_woNA == 0,0,
+                                     temp$Freq / temp$Var1_sum_woNA))
+
+temp$Var2_ordered <- factor(temp$Var2, levels = order_of_markers)
+
+ggplot(temp, aes(x = Var1_ordered, y = Var2_ordered, fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+
+temp$keep <- 0
+
+for (i in unique(temp$Var2)[unique(temp$Var2) != '']){
+  max_ <- max(temp[temp$Var2 ==i,]$Var1_perc_woNA)
+  print(paste0(i,': ', max_))
+  temp[temp$Var2 == i,]$keep <- max_ > .2
+}
+
+# table(is.na(temp$keep2))
+
+temp$keep2 <- temp$keep | (temp$box == 1)
+
+
+ggplot(temp[temp$keep2,], aes(x = Var1_ordered, y = Var2_ordered,
+                              fill = Var1_perc_woNA, label = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = 'white', high = 'red') +
+  geom_tile(data = temp[temp$box == 1,], aes(x = Var1_ordered, y = Var2_ordered),
+            fill = NA,color = 'black',width = .9, height = .9,linewidth = 1) +
+  geom_text(size = 2) +
+  labs(fill = 'Perc. of\nSig. Hits') +
+  xlab('Clusters') +
+  ylab('Sig. Marker Set') +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle('Cells with Significant Markers Scores (> 3*sd above mean)') 
+
+# ggsave('./dfhannum/gabbi_scRNA/images/plae_curated_assignments_to_cells_subset.png', 
+#        device = 'png', units = 'in', width = 8, height = 7)
+```
+
+
+Adding the max freq (aka boxed entry) as the label for label transferring to the scRNA.
+
+```{r}
+top_hit_labels <- temp[temp$box == 1,]$Var2
+names(top_hit_labels) <- temp[temp$box == 1,]$Var1
+top_hit_labels <- as.character(top_hit_labels[order(as.numeric(names(top_hit_labels)))])
+
+obj$top_hit_labels <- factor(obj$seurat_clusters, labels = top_hit_labels)
+
+table(obj$seurat_clusters, obj$top_hit_labels)
+
+DimPlot(obj, group.by = 'top_hit_labels', label = T)
+
+obj$fine_top_hit_labels <- paste0(obj$seurat_clusters,':',obj$top_hit_labels)
+```
 
 ```{r}
 temp <- as.data.frame(table(obj$seurat_clusters, obj$plae_curated_assignments_2sd_max))
@@ -1819,6 +2239,11 @@ DimPlot(obj, group.by = 'top_hit_labels', label = T)
 obj$fine_top_hit_labels <- paste0(obj$seurat_clusters,':',obj$top_hit_labels)
 ```
 
+```{r}
+# breaker_breaker
+
+obj@meta.data
+```
 
 
 ## Marker Genes
@@ -2393,6 +2818,8 @@ saveRDS(centroids$RNA, './data/cluster_centroids.Rds')
 
 names(degs_) <- paste0('Cluster',names(degs_))
 saveRDS(degs_,'./data/cluster_cond_degs.Rds')
+
+saveRDS(plae_centroid_hv, './data/plae_centroid_hv_plot.Rds')
 ```
 
 
